@@ -4535,6 +4535,23 @@
       flex-shrink: 0;
     }
 
+
+    /* Offline Cache Mode Visual Indicators */
+    .mode-strip.is-offline {
+      background: #fffbeb;
+      color: #92400e;
+      border-bottom-color: #fde68a;
+    }
+    .mon-live-pill.is-offline {
+      background: linear-gradient(180deg, #d97706, #b45309);
+      border-color: #fde68a;
+      box-shadow: 0 4px 12px rgba(217, 119, 6, 0.35);
+    }
+    .mon-live-pill.is-offline .mon-live-dot {
+      background: #fef08a;
+      box-shadow: 0 0 6px #fde047;
+    }
+
   </style>
 </head>
 <body>
@@ -4556,8 +4573,8 @@
       </div>
     </header>
 
-    <div class="mode-strip">
-      <span>👁️ وضع المراقبة فقط (قراءة مباشرة بدون تعديل)</span>
+    <div class="mode-strip" id="modeStrip">
+      <span id="modeStripLabel">👁️ وضع المراقبة فقط (قراءة مباشرة بدون تعديل)</span>
       <span id="lastSyncTime">--:--</span>
     </div>
 
@@ -4847,7 +4864,7 @@
       </div>
 
       <div class="mon-right">
-        <button class="mon-live-pill" onclick="fetchSheetLive(true)" title="تحديث مباشر الآن"><span class="mon-live-dot"></span><span>مباشر الآن 📶</span></button>
+        <button id="monLivePill" class="mon-live-pill" onclick="fetchSheetLive(true)" title="تحديث مباشر الآن"><span class="mon-live-dot"></span><span id="monLivePillText">مباشر الآن 📶</span></button>
         <div class="mon-clock">
           <div class="mon-clock-time" id="monClockTime">--:--:--</div>
           <div class="mon-clock-date" id="monClockDate">----</div>
@@ -5105,8 +5122,12 @@
   <script>
     const SHEET_ID = '1tKnczYLp_Y1ffdvu3G3RXVvvWRRyNJ395JNSuR8CTKo';
     const SHEET_GID = '416010360';
+    const OFFLINE_CACHE_KEY = 'mon_items_cache_v1';
 
     let items = [];
+    let isOfflineData = false;
+    let lastCacheSavedAt = 0;
+    let fetchTimeoutId = null;
     let currentFilter = 'all';
     let dangerPct = Number(localStorage.getItem('mon_danger_pct')) || 25;
     let warnPct = Number(localStorage.getItem('mon_warn_pct')) || 50;
@@ -5293,31 +5314,145 @@
         </div>`;
     }
 
+    function formatSyncTimestamp(ts, offlineMode = false) {
+      if (!ts) return '--:--';
+      const d = new Date(ts);
+      const now = new Date();
+      const timeStr = d.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' });
+      const sameDay =
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === now.getMonth() &&
+        d.getDate() === now.getDate();
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      const prefix = offlineMode ? 'محفوظة:' : 'آخر تحديث:';
+      return sameDay ? `${prefix} ${timeStr}` : `${prefix} ${dd}-${mm}-${yyyy} • ${timeStr}`;
+    }
+
+    function saveOfflineCache(parsedItems) {
+      const savedAt = Date.now();
+      lastCacheSavedAt = savedAt;
+      try {
+        localStorage.setItem(OFFLINE_CACHE_KEY, JSON.stringify({
+          savedAt,
+          items: parsedItems
+        }));
+      } catch (e) {
+        console.warn('تعذر حفظ النسخة الاحتياطية في المتصفح:', e);
+      }
+    }
+
+    function loadOfflineCache() {
+      try {
+        const raw = localStorage.getItem(OFFLINE_CACHE_KEY);
+        if (!raw) return false;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed.items) || !parsed.items.length) return false;
+        items = parsed.items.map(it => {
+          const copy = Object.assign({}, it);
+          if (!copy.key) copy.key = getItemKey(copy);
+          return copy;
+        });
+        lastCacheSavedAt = Number(parsed.savedAt) || 0;
+        isOfflineData = true;
+        updateOfflineUI();
+        render();
+        return true;
+      } catch (e) {
+        console.warn('تعذر قراءة النسخة الاحتياطية:', e);
+        return false;
+      }
+    }
+
+    function updateOfflineUI() {
+      const strip = document.getElementById('modeStrip');
+      const stripLbl = document.getElementById('modeStripLabel');
+      const syncEl = document.getElementById('lastSyncTime');
+      const livePill = document.getElementById('monLivePill');
+      const livePillTxt = document.getElementById('monLivePillText');
+
+      if (isOfflineData && items.length > 0) {
+        if (strip) strip.classList.add('is-offline');
+        if (stripLbl) stripLbl.textContent = '📴 وضع أوفلاين (عرض آخر نسخة محفوظة في المتصفح)';
+        if (syncEl) syncEl.textContent = formatSyncTimestamp(lastCacheSavedAt, true);
+        if (livePill) livePill.classList.add('is-offline');
+        if (livePillTxt) livePillTxt.textContent = 'أوفلاين (نسخة محفوظة) 📴';
+      } else {
+        if (strip) strip.classList.remove('is-offline');
+        if (stripLbl) stripLbl.textContent = '👁️ وضع المراقبة فقط (قراءة مباشرة بدون تعديل)';
+        if (syncEl && lastCacheSavedAt) syncEl.textContent = formatSyncTimestamp(lastCacheSavedAt, false);
+        if (livePill) livePill.classList.remove('is-offline');
+        if (livePillTxt) livePillTxt.textContent = 'مباشر الآن 📶';
+      }
+    }
+
+    function handleFetchFailure(reasonMsg) {
+      clearTimeout(fetchTimeoutId);
+      fetchTimeoutId = null;
+      const btn = document.getElementById('refreshBtn');
+      if (btn) btn.classList.remove('spinning');
+      const oldScript = document.getElementById('gvizScript');
+      if (oldScript) oldScript.remove();
+
+      if (!items.length) {
+        loadOfflineCache();
+      }
+
+      if (items.length > 0) {
+        isOfflineData = true;
+        updateOfflineUI();
+        render();
+        if (manualFeedback) {
+          showToast(`لا يوجد اتصال — يتم عرض آخر نسخة محفوظة (${formatSyncTimestamp(lastCacheSavedAt, true)})`);
+        }
+      } else {
+        document.getElementById('connStatus').textContent = 'لا يوجد اتصال بالإنترنت';
+        document.getElementById('list').innerHTML =
+          '<div class="empty">تعذر الاتصال بجدول البيانات ولا توجد نسخة محفوظة مسبقاً في هذا المتصفح.<br/>اتصل بالإنترنت واضغط زر التحديث 🔄 لحفظ أول نسخة تلقائياً.</div>';
+        if (manualFeedback) showToast(reasonMsg || 'تعذر الاتصال بالإنترنت أو بالجدول');
+      }
+    }
+
     function fetchSheetLive(showMsg = false) {
       manualFeedback = showMsg;
       const btn = document.getElementById('refreshBtn');
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        handleFetchFailure('لا يوجد اتصال بالإنترنت');
+        return;
+      }
+
       btn.classList.add('spinning');
-      document.getElementById('connStatus').textContent = 'جاري جلب البيانات الحية...';
+      if (!items.length) {
+        document.getElementById('connStatus').textContent = 'جاري جلب البيانات الحية...';
+      } else {
+        document.getElementById('connStatus').textContent = 'جاري تحديث البيانات من الجدول...';
+      }
 
       const oldScript = document.getElementById('gvizScript');
       if (oldScript) oldScript.remove();
+
+      clearTimeout(fetchTimeoutId);
+      fetchTimeoutId = setTimeout(() => {
+        handleFetchFailure('انتهت مهلة الاتصال بالجدول');
+      }, 12000);
 
       const script = document.createElement('script');
       script.id = 'gvizScript';
       script.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${SHEET_GID}&tqx=responseHandler:handleGvizResponse&_=${Date.now()}`;
       script.onerror = function () {
-        btn.classList.remove('spinning');
-        document.getElementById('connStatus').textContent = 'تعذر الاتصال بالجدول';
-        showToast('تعذر الاتصال بالإنترنت أو بالجدول');
+        handleFetchFailure('تعذر الاتصال بالإنترنت أو بالجدول');
       };
       document.body.appendChild(script);
     }
 
     window.handleGvizResponse = function (response) {
+      clearTimeout(fetchTimeoutId);
+      fetchTimeoutId = null;
       document.getElementById('refreshBtn').classList.remove('spinning');
       if (!response || response.status !== 'ok' || !response.table || !response.table.rows) {
-        document.getElementById('connStatus').textContent = 'تعذر قراءة الجدول';
-        showToast('تعذر قراءة البيانات من الرابط');
+        handleFetchFailure('تعذر قراءة البيانات من الرابط');
         return;
       }
 
@@ -5351,11 +5486,11 @@
       }
 
       items = parsed;
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString('ar-IQ', { hour: '2-digit', minute: '2-digit' });
-      document.getElementById('lastSyncTime').textContent = `آخر تحديث: ${timeStr}`;
+      isOfflineData = false;
+      saveOfflineCache(parsed);
+      updateOfflineUI();
       render();
-      if (manualFeedback) showToast(`تم تحديث ${items.length} مادة بنجاح`);
+      if (manualFeedback) showToast(`تم تحديث وحفظ ${items.length} مادة بنجاح`);
     };
 
     function setFilter(f) {
@@ -5375,10 +5510,13 @@
 
       const visibleItems = items.filter(it => isItemVisible(it));
 
-      document.getElementById('connStatus').textContent =
-        visibleItems.length === items.length
-          ? `مرتبط مباشرة • ${items.length} مادة`
-          : `يعرض ${visibleItems.length} من أصل ${items.length} مادة`;
+      document.getElementById('connStatus').textContent = isOfflineData
+        ? (visibleItems.length === items.length
+            ? `أوفلاين (نسخة محفوظة) • ${items.length} مادة`
+            : `أوفلاين • يعرض ${visibleItems.length} من أصل ${items.length} مادة`)
+        : (visibleItems.length === items.length
+            ? `مرتبط مباشرة • ${items.length} مادة`
+            : `يعرض ${visibleItems.length} من أصل ${items.length} مادة`);
 
       let cOk = 0, cWarn = 0, cDanger = 0;
       visibleItems.forEach(it => {
@@ -7270,7 +7408,8 @@ ${htmlTag}
         const labelMap = { danger: 'المفقود والحرج', warn: 'الشحيح', ok: 'المتوفر' };
         subTxt = 'عرض: ' + activeFilters.map(k => labelMap[k]).join(' و ');
       }
-      document.getElementById('monSubStatus').textContent = `بث حي ومباشر • ${subTxt}`;
+      const livePrefix = isOfflineData ? 'وضع أوفلاين (آخر نسخة محفوظة)' : 'بث حي ومباشر';
+      document.getElementById('monSubStatus').textContent = `${livePrefix} • ${subTxt}`;
 
       // Sync Modern Quick Filter Pills (supports multi-selection)
       const pillsWrap = document.getElementById('monModernPills');
@@ -7736,9 +7875,25 @@ ${htmlTag}
       if (_monEl) _monRo.observe(_monEl);
     }
 
+    window.addEventListener('online', () => {
+      showToast('عاد الاتصال بالإنترنت — جاري تحديث البيانات...');
+      fetchSheetLive(false);
+    });
+
+    window.addEventListener('offline', () => {
+      if (items.length > 0) {
+        isOfflineData = true;
+        updateOfflineUI();
+        render();
+        showToast('انقطع الإنترنت — يستمر العرض من آخر نسخة محفوظة');
+      }
+    });
+
     updateMonAutoIndicator();
     setupAutoRefresh();
     resetIdleTimer();
+    // تحميل آخر نسخة محفوظة فوراً للعمل بدون إنترنت ثم التحديث بالخلفية
+    loadOfflineCache();
     fetchSheetLive(false);
   </script>
 </body>
